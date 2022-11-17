@@ -14,6 +14,7 @@
 
 //! Common functions used by the backends
 
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,21 +34,29 @@ const MULTI_CLICK_MAX_DISTANCE: f64 = 5.0;
 ///
 /// Changes "E&xit" to "Exit". Actual ampersands are escaped as "&&".
 #[allow(dead_code)]
-pub fn strip_access_key(raw_menu_text: &str) -> String {
-    let mut saw_ampersand = false;
-    let mut result = String::new();
-    for c in raw_menu_text.chars() {
-        if c == '&' {
-            if saw_ampersand {
+pub fn strip_access_key<'a>(raw_menu_text: &'a str) -> Cow<'a, str> {
+    let mut iter = raw_menu_text.split('&');
+    let first = iter.next().expect("unreachable");
+    if iter.next().is_some() {
+        let mut saw_ampersand = false;
+        let mut result = String::with_capacity(raw_menu_text.len());
+        result.push_str(first);
+        for c in raw_menu_text[first.len()..].chars() {
+            if c == '&' {
+                if saw_ampersand {
+                    result.push(c);
+                }
+                saw_ampersand = !saw_ampersand;
+            } else {
                 result.push(c);
+                saw_ampersand = false;
             }
-            saw_ampersand = !saw_ampersand;
-        } else {
-            result.push(c);
-            saw_ampersand = false;
         }
+        Cow::Owned(result)
+    } else {
+        // no ampersands
+        Cow::Borrowed(raw_menu_text)
     }
-    result
 }
 
 /// A trait for implementing the boxed callback hack.

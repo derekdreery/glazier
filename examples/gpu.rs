@@ -21,10 +21,6 @@ use glazier::{
     Application, Cursor, FileDialogOptions, FileDialogToken, FileInfo, FileSpec, HotKey, KeyEvent,
     Menu, MouseEvent, Region, SysMods, TimerToken, WinHandler, WindowBuilder, WindowHandle,
 };
-use piet_gpu_hal::{
-    include_shader, BindType, Buffer, BufferUsage, ComputePassDescriptor, DescriptorSet, Image,
-    ImageFormat, ImageLayout, Instance, InstanceFlags, Pipeline, Semaphore, Session, Swapchain,
-};
 use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
 use tracing::info;
 
@@ -42,7 +38,8 @@ impl WinHandler for HelloState {
 
     fn size(&mut self, size: Size) {
         info!("size: {:?}", size);
-        self.size = size;
+        let mut guard = self.gpu_state.lock().unwrap();
+        unsafe { guard.as_mut().unwrap().resize() }.unwrap();
     }
 
     fn prepare_paint(&mut self) {
@@ -50,67 +47,7 @@ impl WinHandler for HelloState {
     }
 
     fn paint(&mut self, _: &Region) {
-        unsafe {
-            // TODO: wire up size
-            let width = 1000;
-            let height = 800;
-            let mut state_guard = self.gpu_state.lock().unwrap();
-            let state = state_guard.as_mut().unwrap();
-            let frame_idx = state.current_frame % 2;
-            let (image_idx, acquisition_semaphore) = state.swapchain.next().unwrap();
-            let swap_image = state.swapchain.image(image_idx);
-
-            // TODO: wire up time for animation purposes
-            let i_time: f32 = 0.0;
-            let config_data = [width, height, i_time.to_bits()];
-            state.config_host.write(&config_data).unwrap();
-
-            let mut cmd_buf = state.session.cmd_buf().unwrap();
-            cmd_buf.begin();
-            cmd_buf.image_barrier(&swap_image, ImageLayout::Undefined, ImageLayout::BlitDst);
-            cmd_buf.copy_buffer(&state.config_host, &state.config_dev);
-            cmd_buf.memory_barrier();
-
-            cmd_buf.image_barrier(
-                &state.staging_img,
-                ImageLayout::Undefined,
-                ImageLayout::General,
-            );
-            let wg_x = width / 16;
-            let wg_y = height / 16;
-            let mut pass = cmd_buf.begin_compute_pass(&ComputePassDescriptor::default());
-            pass.dispatch(
-                &state.pipeline,
-                &state.descriptor_set,
-                (wg_x, wg_y, 1),
-                (16, 16, 1),
-            );
-            pass.end();
-            cmd_buf.image_barrier(
-                &state.staging_img,
-                ImageLayout::General,
-                ImageLayout::BlitSrc,
-            );
-            cmd_buf.blit_image(&state.staging_img, &swap_image);
-            cmd_buf.image_barrier(&swap_image, ImageLayout::BlitDst, ImageLayout::Present);
-            cmd_buf.finish();
-            let submitted = state
-                .session
-                .run_cmd_buf(
-                    cmd_buf,
-                    &[&acquisition_semaphore],
-                    &[&state.present_semaphores[frame_idx]],
-                )
-                .unwrap();
-            state
-                .swapchain
-                .present(image_idx, &[&state.present_semaphores[frame_idx]])
-                .unwrap();
-            let start = std::time::Instant::now();
-            submitted.wait().unwrap();
-            info!("wait elapsed: {:?}", start.elapsed());
-            state.current_frame += 1;
-        }
+        self.render();
     }
 
     fn command(&mut self, id: u32) {
@@ -202,65 +139,40 @@ impl WinHandler for HelloState {
 impl HelloState {
     fn render(&self) {
         unsafe {
-            // TODO: wire up size
-            let width = 1000;
-            let height = 800;
+            let (width, height) = size_px(&self.handle);
             let mut state_guard = self.gpu_state.lock().unwrap();
             let state = state_guard.as_mut().unwrap();
-            let frame_idx = state.current_frame % 2;
-            let (image_idx, acquisition_semaphore) = state.swapchain.next().unwrap();
-            let swap_image = state.swapchain.image(image_idx);
-
-            // TODO: wire up time for animation purposes
-            let i_time: f32 = 0.0;
-            let config_data = [width, height, i_time.to_bits()];
-            state.config_host.write(&config_data).unwrap();
-
-            let mut cmd_buf = state.session.cmd_buf().unwrap();
-            cmd_buf.begin();
-            cmd_buf.image_barrier(&swap_image, ImageLayout::Undefined, ImageLayout::BlitDst);
-            cmd_buf.copy_buffer(&state.config_host, &state.config_dev);
-            cmd_buf.memory_barrier();
-
-            cmd_buf.image_barrier(
-                &state.staging_img,
-                ImageLayout::Undefined,
-                ImageLayout::General,
-            );
-            let wg_x = width / 16;
-            let wg_y = height / 16;
-            let mut pass = cmd_buf.begin_compute_pass(&ComputePassDescriptor::default());
-            pass.dispatch(
-                &state.pipeline,
-                &state.descriptor_set,
-                (wg_x, wg_y, 1),
-                (16, 16, 1),
-            );
-            pass.end();
-            cmd_buf.image_barrier(
-                &state.staging_img,
-                ImageLayout::General,
-                ImageLayout::BlitSrc,
-            );
-            cmd_buf.blit_image(&state.staging_img, &swap_image);
-            cmd_buf.image_barrier(&swap_image, ImageLayout::BlitDst, ImageLayout::Present);
-            cmd_buf.finish();
-            let submitted = state
-                .session
-                .run_cmd_buf(
-                    cmd_buf,
-                    &[&acquisition_semaphore],
-                    &[&state.present_semaphores[frame_idx]],
-                )
-                .unwrap();
-            state
-                .swapchain
-                .present(image_idx, &[&state.present_semaphores[frame_idx]])
-                .unwrap();
-            let start = std::time::Instant::now();
-            submitted.wait().unwrap();
-            info!("wait elapsed: {:?}", start.elapsed());
-            state.current_frame += 1;
+            let output = state.surface.get_current_texture().unwrap();
+            let view = output
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder =
+                state
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Render Encoder"),
+                    });
+            {
+                let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Render Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.1,
+                                g: 0.2,
+                                b: 0.3,
+                                a: 1.0,
+                            }),
+                            store: true,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                });
+            }
+            state.queue.submit(std::iter::once(encoder.finish()));
+            output.present();
         }
     }
 }
@@ -303,9 +215,7 @@ fn main() {
 
     let window = builder.build().unwrap();
     unsafe {
-        let width = 1000;
-        let height = 800;
-        let state = GpuState::new(&window, width, height).unwrap();
+        let state = pollster::block_on(GpuState::new(window.clone()));
         *gpu_state.lock().unwrap() = Some(state);
     }
     window.show();
@@ -314,59 +224,85 @@ fn main() {
 }
 
 struct GpuState {
-    _instance: Instance,
-    current_frame: usize,
-    session: Session,
-    swapchain: Swapchain,
-    present_semaphores: Vec<Semaphore>,
-    pipeline: Pipeline,
-    descriptor_set: DescriptorSet,
-    config_host: Buffer,
-    config_dev: Buffer,
-    staging_img: Image,
+    handle: WindowHandle,
+    surface: wgpu::Surface,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    size: (u32, u32),
 }
 
 impl GpuState {
-    unsafe fn new(
-        window: &WindowHandle,
-        width: usize,
-        height: usize,
-    ) -> Result<GpuState, Box<dyn std::error::Error>> {
-        let instance = Instance::new(InstanceFlags::empty())?;
-        let surface = instance.surface(window.raw_display_handle(), window.raw_window_handle())?;
-        let device = instance.device()?;
-        let swapchain = instance.swapchain(width, height, &device, &surface)?;
-        let session = Session::new(device);
-        let present_semaphores = (0..2)
-            .map(|_| session.create_semaphore())
-            .collect::<Result<Vec<_>, _>>()?;
-        let shader_code = include_shader!(&session, "./shader/gen/shader");
-        let pipeline =
-            session.create_compute_pipeline(shader_code, &[BindType::Buffer, BindType::Image])?;
-        let config_size = 12;
-        let config_host =
-            session.create_buffer(config_size, BufferUsage::COPY_SRC | BufferUsage::MAP_WRITE)?;
-        let config_dev =
-            session.create_buffer(config_size, BufferUsage::COPY_DST | BufferUsage::STORAGE)?;
-        let staging_img =
-            session.create_image2d(width as u32, height as u32, ImageFormat::Rgba8)?;
-        let descriptor_set = session
-            .descriptor_set_builder()
-            .add_buffers(&[&config_dev])
-            .add_images(&[&staging_img])
-            .build(&session, &pipeline)?;
-        let current_frame = 0;
-        Ok(GpuState {
-            _instance: instance,
-            current_frame,
-            session,
-            swapchain,
-            present_semaphores,
-            pipeline,
-            descriptor_set,
-            config_host,
-            config_dev,
-            staging_img,
-        })
+    async unsafe fn new(handle: WindowHandle) -> Self {
+        let (width, height) = size_px(&handle);
+
+        let instance = wgpu::Instance::new(wgpu::Backends::all());
+        let surface = instance.create_surface(&handle);
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::default(),
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .unwrap();
+
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    features: wgpu::Features::empty(),
+                    limits: if cfg!(target_arch = "wasm32") {
+                        wgpu::Limits::downlevel_webgl2_defaults()
+                    } else {
+                        wgpu::Limits::default()
+                    },
+                    label: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface.get_supported_formats(&adapter)[0],
+            width,
+            height,
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+        };
+        surface.configure(&device, &config);
+
+        Self {
+            handle,
+            surface,
+            device,
+            queue,
+            config,
+            size: (width, height),
+        }
     }
+
+    unsafe fn resize(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let (width, height) = size_px(&self.handle);
+        if self.size == (width, height) {
+            // nothing to do
+            return Ok(());
+        }
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(&self.device, &self.config);
+
+        Ok(())
+    }
+}
+
+fn size_px(handle: &WindowHandle) -> (u32, u32) {
+    let Size { width, height } = handle.get_size();
+    info!("size: ({}, {})", width, height);
+    info!("scale: {:?}", handle.get_scale().unwrap());
+    let (width, height) = handle.get_scale().unwrap().dp_to_px_xy(width, height);
+    let (width, height) = (width as u32, height as u32);
+    assert!(width > 0 && height > 0, "width and height must be > 0");
+    (width, height)
 }

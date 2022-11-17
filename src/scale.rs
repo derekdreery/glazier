@@ -136,6 +136,25 @@ impl Scale {
     pub fn px_to_dp_xy<T: Into<f64>>(self, x: T, y: T) -> (f64, f64) {
         (x.into() / self.x, y.into() / self.y)
     }
+
+    /// Converts from display points into pixels, using the x axis scale factor.
+    #[inline]
+    pub fn dp_to_px_x<T: Into<f64>>(self, x: T) -> f64 {
+        x.into() * self.x
+    }
+
+    /// Converts from display points into pixels, using the y axis scale factor.
+    #[inline]
+    pub fn dp_to_px_y<T: Into<f64>>(self, y: T) -> f64 {
+        y.into() * self.y
+    }
+
+    /// Converts from display points into pixels,
+    /// using the x axis scale factor for `x` and the y axis scale factor for `y`.
+    #[inline]
+    pub fn dp_to_px_xy<T: Into<f64>>(self, x: T, y: T) -> (f64, f64) {
+        (x.into() * self.x, y.into() * self.y)
+    }
 }
 
 impl Scalable for Vec2 {
